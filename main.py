@@ -10,16 +10,24 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from fastapi import FastAPI
 
+from db.database import init_db
 from bot.handlers import search as search_handler
 from routers import search
+from services.monitor import run_monitor
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = getenv("BOT_TOKEN")
 
-async def start_bot():
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    logger.info("Database initialized")
+
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -28,19 +36,18 @@ async def start_bot():
     dp.include_router(search_handler.router)
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Telegram bot started")
-    await dp.start_polling(bot)
 
+    bot_task = asyncio.create_task(dp.start_polling(bot))
+    monitor_task = asyncio.create_task(run_monitor(bot))
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    bot_task = asyncio.create_task(start_bot())
     yield
+
+    monitor_task.cancel()
     bot_task.cancel()
     try:
-        await bot_task
+        await asyncio.gather(monitor_task, bot_task)
     except asyncio.CancelledError:
-        logger.info("Telegram bot stopped")
+        logger.info("Bot and monitor stopped")
 
 
 app = FastAPI(lifespan=lifespan)
